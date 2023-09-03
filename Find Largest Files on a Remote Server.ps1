@@ -1,5 +1,14 @@
 # See Blog Post: https://sqlpal.blogspot.com/2023/08/remotely-check-disk-space-find-and-delete-large-files.html
 
+<#
+In below example,  I am looking for top 5 largest files in O:\ containing *FULL*.BAK in the 
+file name and at least larger than 100MB and last modified date is at least before 8 days. 
+You can change the filter values to your needs and if you don't want to use a filter, 
+just comment it out by putting the hash sign (#) in front it. And lastly, 
+don't forget to change the value for $computer_name variable to your server name. 
+You can also enter multiple server names, separated by a comma, for example:
+#>
+
 # Name of the remote computer
 $computer_name = @("SQLServer1")
  
