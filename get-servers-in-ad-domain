@@ -1,3 +1,5 @@
+# See Blog Post: https://sqlpal.blogspot.com/2019/06/powershell-script-to-find-new-servers.html
+
 <#
 
 You can use this to get list of all servers in an AD domain or
