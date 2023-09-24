@@ -1,0 +1,114 @@
+<#
+
+You can use this to get list of all servers in an AD domain or
+new servers added in last X days, or any other properties
+you want to filter the results on.
+
+You should not need to be a domain admin or 
+need any special permission in the AD.
+This might change in the future versions though.
+
+
+You will need powershell active directory module installed 
+on the computer where you are running this script from.
+
+If you are using a Windows 10 machine like I am right now, 
+here is a good resource to get the AD module installed.
+https://gallery.technet.microsoft.com/Install-the-Active-fd32e541
+
+
+#>
+try
+{
+
+# filter by servers added in last n days
+# or set this to 0 for all servers
+$days_to_search = 30
+
+# if searching in different domain than your current domain, 
+# specifiy the domain name between the double quotes
+$domain = ""                
+
+if ($domain -eq "")
+{
+        $domain = Get-ADDomain 
+}
+else
+{
+        $domain = Get-ADDomain -Identity $domain
+}
+
+
+$domain_name = $domain.name
+$distinguished_name = $domain.DistinguishedName
+$domain_controller = (Get-ADDomainController -server $domain_name).HostName
+
+$search_base = "OU=SERVERS," + $distinguished_name
+$export_file_name = $env:USERPROFILE + "\Documents" + "\new_servers.csv"
+
+
+# convert $days_to_search to a negative value
+if($days_to_search -lt 0) {$days_to_search = -$days_to_search}
+
+
+[String](Get-Date) + ": Begin searching for new servers in the AD domain"
+"-------------------------------------------------------"
+
+if($days_to_search -lt 0)
+{
+   $date_filter = (get-date).adddays($days_to_search)
+   "Date filter value: " + $date_filter
+   $search_filter = {Created -gt $date_filter -and operatingsystem -like "Windows Server*"}
+   "Find new computers added in last " + $days_to_search + " days to AD domain (" + $domain_name + ")"
+
+}
+else
+{
+   $search_filter = {operatingsystem -like "Windows Server*"}
+   "Find all servers in AD domain (" + $domain_name + ")"
+}
+"Search Base: $search_base"
+"Domain controller: " + $domain_controller
+
+
+$computers = @()
+$computers += (get-adcomputer -SearchBase  $search_base -Properties * -Filter $search_filter -server $domain_controller)
+
+[String](Get-Date) + ": Total Number of Servers Found: " + $Computers.Count
+
+# Display the results on the console 
+"Displaying first 100 results...."
+$computers | Select-Object Name, 
+                           Created, 
+                           IPv4Address,
+                           OperatingSystem,
+                           OperatingSystemVersion  -First 100 | ft -AutoSize
+
+
+# Exports results to a CSV file
+[String](Get-Date) + ": Exporting results to ($export_file_name)...."
+$computers | Select-Object Name, 
+                           Created, 
+                           DNSHostName,
+                           IPv4Address,
+                           OperatingSystem,
+                           OperatingSystemHotfix,
+                           OperatingSystemServicePack,
+                           OperatingSystemVersion, 
+                           IPv6Address,
+                           DistinguishedName, 
+                           createTimeStamp, 
+                           Description | Export-CSV `
+                                         $export_file_name -NoTypeInformation `
+                                                           -Encoding UTF8
+
+
+[String](Get-Date) + ": End searching for new computers"
+
+}
+Catch
+{
+    [String](Get-Date) + ": Error occurred"
+    throw
+   
+}
