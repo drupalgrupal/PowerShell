@@ -40,7 +40,7 @@ $Host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size (500, 300
 "summary"
 "======="
 
-$server_summary | ft -AutoSize
+$server_summary | fl
 
 ""
 "Detailed Properties"
