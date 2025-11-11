@@ -1,243 +1,235 @@
-##### CAUTION: THE SCRIPT WILL STOP AND RESTART YOUR SQL SERVER INSTANCE!!!!!!!!!
+# https://sqlpal.blogspot.com/2023/09/How-To-Gain-Access-To-SQLServer-As-DBA.html
+
+##### CAUTION: THE SCRIPT WILL STOP AND RESTART YOUR SQL SERVER INSTANCE!!!!!!!!! 
 <#
 THIS SCRIPT IS INTENDED TO GET ACCESS TO SQL SERVER ONLY IF 
-YOU DON'T HAVE SYSADMIN PERMISSION. SO ONLY USE THIS IN EMERGENCY
+YOU DON'T HAVE SYSADMIN PERMISSION. USE ONLY IN EMERGENCY.
 
-ON THE PLUS SIDE, IT HAS OPTION TO PROMPT YOU FOR CONFIRMATION BEFORE 
-STOPPING THE SQL INSTANCE
+REQUIREMENTS:
+1. Local Administrator rights on the server
+2. Run locally or via Invoke-Command with PSRemoting enabled (default on Windows Server 2012+)
+3. Elevated PowerShell session (Run as Administrator)
 
-REQUIREMENTS:.
+PARAMETERS:
+- $login_to_be_granted_access (string, required): Windows or SQL login to grant sysadmin access
+- $sql_instance_name (string, optional): SQL instance name (default instance if omitted)
+- $confirm (bool, optional): Prompt for confirmation before stopping SQL service. Default: $true
+- $sql_login_password (string, optional): SQL login password required if SQL login
 
-1. YOU MUST HAVE THE LOCAL ADMINISTRATOR RIGHTS ON THE SERVER
-2. YOU ARE RUNNING THE SCRIPT LOCALLY ON THE SERVER, OR 
-   THROUGH THE INVOKE-COMMMAND CMDLET
-3. THE POWERSHELL MUST BE LAUNCHED WITH ELEVATED ADMINISTRATIVE PRIVILEGES
 
-PARAMETERS: ONLY THE FIRST PARAMETER, $login_to_be_granted_access, IS REQUIRED
+Example 1: Running the Script Locally
 
-1.  $login_to_be_granted_access --> This can be a Windows Login or SQL Login
-                                    $sql_login_password is required for SQL Login
+- Save the script on your local device, for example as C:\Scripts\Gain-SqlSysadminAccess.ps1
+- Open PowerShell with Administrative privileges (Run as Administrator).
+- Navigate to the folder containing your script, for example: 
+  cd C:\Scripts
 
-2.  $sql_instance_name -----------> Only specify the sql instance name without the server name
-                                    If omitted, the default instance is assumed
+- Run the script with required parameters. For example, to grant sysadmin access to a 
+  Windows login named "DOMAIN\User1" on default instance with confirmation prompt:
 
-3.  $confirm ---------------------> $true or $false to prompt for confirmation
+.\Gain-SqlSysadminAccess.ps1 -login_to_be_granted_access "DOMAIN\User1" -confirm $false
 
-Optional: Only required for SQL Login
-4.  $sql_login_password ----------> Password for the SQL Login
+
+Example 2: Running the Script Remotely Using Invoke-Command
+
+- From your local machine with PowerShell launched as Administrator, 
+  run the script on a remote computer (e.g., RemoteServer01). 
+  Make sure PSRemoting is enabled on the remote server.
+
+- Use the following command to invoke the script remotely:
+
+# Run the local script on a remote computer, passing parameters
+Invoke-Command -ComputerName RemoteServer01 `
+    -FilePath "C:\Scripts\Gain-SqlSysadminAccess.ps1" `
+    -ArgumentList "DOMAIN\User1", "SQL2022AG01", $false
+
+- Replace parameters accordingly for your target environment
+
 
 #>
+
 param (
-  [string] $login_to_be_granted_access = 'sqladmin',
-  [string] $sql_instance_name = 'SQL2022AG01',  
-  [Boolean] $confirm = $true,
-  [string] $sql_login_password = 'WA1!!1P7JRjN7F4eibEES&IxU%Elgw6b#'
+    [string] $login_to_be_granted_access = 'sqladmin',
+    [string] $sql_instance_name = 'SQL2022AG01',
+    [bool] $confirm = $true,
+    [string] $sql_login_password = 'WA1!!1P7JRjN7F4eibEES&IxU%Elgw6b#'
 )
 
-
-# set the default preferences
+# Set default preferences
 $ErrorActionPreference = 'Stop'
-$WarningPreference     = 'Continue'
+$WarningPreference = 'Continue'
 $InformationPreference = 'Continue'
 
-# if value for sql_instance_name is blnak then assume the default instance
-if (-Not ($sql_instance_name)) {$sql_instance_name = 'MSSQLSERVER'}
+# Assume default instance if sql_instance_name not specified
+if (-not $sql_instance_name) { $sql_instance_name = 'MSSQLSERVER' }
+if ($null -eq $confirm) { $confirm = $true }
 
-# if value for $confirm is blank then assume $true
-if ($confirm -eq $null) {$confirm = $true}
+Write-Information "Computer Name: $env:COMPUTERNAME"
+Write-Information "SQL Instance Name: $sql_instance_name`n"
 
-
-$msg = 'Computer Name: ' + $env:COMPUTERNAME
-Write-Information $msg
-$msg = 'SQL Instance Name: ' + $sql_instance_name
-Write-Information $msg
-
-Write-Information ""
-
-# SHOW PROMPT IF $confirm IS TRUE
-if ($confirm -eq $true)
-{
-    $valid_responses = "Yes", "yes", "No", "no"
+# Confirm prompt if required
+if ($confirm) {
+    $valid_responses = 'Yes', 'yes', 'No', 'no'
     do {
         Write-Warning "##### CAUTION: THE SCRIPT WILL STOP AND RESTART YOUR SQL SERVER INSTANCE!!!!!!!!!"
-        $response = Read-Host -Prompt "Are you sure you want to continue (Yes/No) ?"
-        if(-not $valid_responses.Contains($response)){write-host "Please enter Yes or No"}
+        $response = Read-Host "Are you sure you want to continue (Yes/No)?"
+        if (-not $valid_responses.Contains($response)) {
+            Write-Host "Please enter Yes or No"
+        }
     } until ($valid_responses.Contains($response))
 
-    if ($response -in ('No', 'no') )
-    {
-        return
-    }
+    if ($response -in @('No', 'no')) { return }
 }
-else
-{
-    Write-Warning '$confirm is false therefore all prompts will be suppressed.'
+else {
+    Write-Warning "Confirmation prompts are disabled."
     Write-Information ""
 }
 
-
-# LETS DO A BIT OF VALIDATION
-if (-not ($sql_instance_name) -or (-not ($login_to_be_granted_access)))
-{
-    Throw 'Error: Values for $sql_instance_name and $login_to_be_granted_access are required'
+# Validate mandatory parameters
+if (-not $sql_instance_name -or -not $login_to_be_granted_access) {
+    throw "Error: Both `\$sql_instance_name` and `\$login_to_be_granted_access` are required."
+}
+if (-not $login_to_be_granted_access.Contains('\') -and -not $sql_login_password) {
+    throw "A password must be provided for SQL Login."
 }
 
-if (-not ($login_to_be_granted_access.Contains('\')) -and (-not ($sql_login_password)))
-{
-    Throw 'A password must be given for SQL Login'
-
+# Check for elevated privileges
+$isAdmin = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).Owner -eq 'S-1-5-32-544'
+if (-not $isAdmin) {
+    throw "Error: Powershell must be launched in elevated privileges mode (Run as Administrator)."
 }
 
-# CHECK IF RUNNING POWERSHELL IN ELEVATED PRIVILEDGES MODE
-if(-Not (([System.Security.Principal.WindowsIdentity]::GetCurrent()).Owner -eq "S-1-5-32-544"))
-{
-    Throw 'Error: Powershell must be launched in elevated privileges mode'
-}
-
-
-# GET THE NAME OF THE WINDOWS SERVICE AND THE SQL CONNECTION
-if($sql_instance_name -eq "MSSQLSERVER")   # DEFAULT INSTANCE
-{
+# Determine service and SQL Server instance names
+if ($sql_instance_name -eq 'MSSQLSERVER') {
     $service_name = 'MSSQLSERVER'
-    $sql_server_instance = "."
+    $sql_server_instance = '.'
 }
-else                                       # NAMED SQL INSTANCE 
-{
+else {
     $service_name = "MSSQL`$$sql_instance_name"
     $sql_server_instance = ".\$sql_instance_name"
 }
 
+Write-Information "SQL Server Instance: $sql_server_instance"
+Write-Information "Service Name: $service_name`n"
 
-Write-Information "SQL Server: $sql_server_instance"
-Write-Information "Serivce Name: $service_name"
-Write-Information ""
-
-# GET THE SERVICE OBJECT AND THE DEPENDENT SERVICES
-$sql_service = Get-Service -Name $service_name
+# Get SQL service and dependent services
+$sql_service = Get-Service -Name $service_name -ErrorAction Stop
 $dependent_services = $sql_service.DependentServices
 
-# 
-# EXTRA CHECK: STOP IF THE SERVICE IS NOT FOUND
-if(-Not ($sql_service))
-{
-        Throw "Error: Please ensure the sql instance $sql_instance_name is valid and a windows service with name $service_name exists..."
+if (-not $sql_service) {
+    throw "Error: SQL instance '$sql_instance_name' or service '$service_name' not found."
 }
 
+Write-Information "Service Status: $($sql_service.Status)"
+Write-Information "Service Startup Type: $($sql_service.StartType)`n"
 
-$msg = "Service Status: " + ($sql_service.Status)
-Write-Information $msg
+# Re-enable if disabled
+if ($sql_service.StartType -eq 'Disabled') {
+    Write-Warning "SQL instance '$sql_instance_name' is currently disabled."
 
-$msg = "Service Startup Type: " + $sql_service.StartType
-Write-Information $msg
+    if ($confirm) { Set-Service -Name $service_name -StartupType Manual -Confirm }
+    else { Set-Service -Name $service_name -StartupType Manual }
 
-Write-Information ""
-
-# IF THE SERVICE IS DISABLED, PROMPT TO RE-ENABLE IT IN MANUAL MODE
-if($sql_service.StartType -eq 'Disabled')
-{
-
-    Write-Warning "SQL Instance sql_instance_name is currently disabled...."
-    
-    if ($confirm) {Set-Service -Name $service_name -StartupType Manual -Confirm}
-    else {Set-Service -Name $service_name -StartupType Manual}
-    
     $sql_service.Refresh()
-
-    if($sql_service.StartType -eq 'Disabled')
-    {
-           Throw "Error: Script cannot continue when SQL Instance is in Disabled mode."
+    if ($sql_service.StartType -eq 'Disabled') {
+        throw "Error: Cannot continue while SQL instance is Disabled."
     }
-
-
 }
 
-# STOP THE SERVICE ONLY IF IT IS RUNNING
-# PROMPT TO CONFIRM BEFORE STOPPING THE SERVICE
+# Stop the service if running
+if ($sql_service.Status -eq 'Running') {
+    Write-Warning "Stopping service: $service_name and its dependent services..."
 
-if($sql_service.Status -eq 'Running')
-{
-    Write-Warning "Stopping service: $service_name"
-    Write-Warning "Any dependent services will also be stopped..."
-    
-    if ($confirm) {Stop-Service -InputObject $sql_service -Confirm -Force}
-    else {Stop-Service -InputObject $sql_service -Force}
+    if ($confirm) { Stop-Service -InputObject $sql_service -Confirm -Force }
+    else { Stop-Service -InputObject $sql_service -Force }
 
+    Start-Sleep -Seconds 1
 
-    Write-Information ""
-    Write-Information "STOP-SERVICE MAY RUN IN ASYNC MODE SO LETS SLEEP FOR FEW SECONDS..."
-    Start-Sleep 5
-    
-    # CHECK TO MAKE SURE THE SERVICE IS NOW STOPPED 
     $sql_service.Refresh()
-
-    if($sql_service.Status -ne "Stopped")
-    {
-        throw "Error: SQL instance service $service_name must be in stopped state before continuing...."
+    if ($sql_service.Status -ne 'Stopped') {
+        throw "Error: SQL instance service '$service_name' did not stop as expected."
     }
-
 }
 
-
-
-#  A WINDOWS SERVICE CAN ONLY BE STARTED IF IT'S START UP TYPE IS MANUAL, AUTOMATIC OR DELAYED AUTOMATIC START 
-#  SO, CONTINUE ONLY IF THE START UP TYPE IS NOT ONE OF THEM
-
+# Start the service in single-user mode if appropriate
 $sql_service.Refresh()
-if($sql_service.Status -ne 'Running' -and $sql_service.StartType -in ('Manual', 'Automatic'))
-{
-    
-    Write-Warning  "Starting SQL Service in single user mode..."
+if ($sql_service.Status -ne 'Running' -and $sql_service.StartType -in @('Manual', 'Automatic')) {
+    Write-Warning "Starting SQL Server service in single user mode..."
     Write-Information ""
-    net start $service_name /f /m
-    Start-Sleep 2
 
-    # CHECK TO MAKE SURE THE INSTANCE IS NOW RUNNING 
+    net start $service_name /f /m"SQLCMD" | Out-Null
+    Start-Sleep -Seconds 1
+
     $sql_service.Refresh()
-    if($sql_service.Status -eq "Running")
-    {
+    if ($sql_service.Status -eq 'Running') {
 
-        if ($login_to_be_granted_access.Contains('\'))
-        {
-            $sql =  "CREATE LOGIN [$login_to_be_granted_access] FROM WINDOWS; ALTER SERVER ROLE sysadmin ADD MEMBER $login_to_be_granted_access; "
+        if ($login_to_be_granted_access.Contains('\')) {
+            $sql = @"
+CREATE LOGIN [$login_to_be_granted_access] FROM WINDOWS;
+GO
+ALTER SERVER ROLE sysadmin ADD MEMBER [$login_to_be_granted_access];
+GO
+SELECT @@ERROR AS [ErrMsg];
+GO
+"@
         }
-        else
-        {
-            $sql = "CREATE LOGIN [$login_to_be_granted_access] WITH PASSWORD=N'$sql_login_password', DEFAULT_DATABASE=[master], CHECK_EXPIRATION=OFF, CHECK_POLICY=OFF"
-            $sql += "; ALTER SERVER ROLE sysadmin ADD MEMBER $login_to_be_granted_access; "
+        else {
+            $sql = @"
+CREATE LOGIN [$login_to_be_granted_access] WITH PASSWORD=N'$sql_login_password', DEFAULT_DATABASE=[master], CHECK_EXPIRATION=OFF, CHECK_POLICY=OFF;
+ALTER SERVER ROLE sysadmin ADD MEMBER [$login_to_be_granted_access];
+SELECT @@ERROR AS [ErrMsg];
+"@
         }
 
-
-        $msg = "Adding $login_to_be_granted_access to the SYSADMIN role in SQL Server..."
-        Write-Information $msg
+        Write-Information "Adding login '$login_to_be_granted_access' to SYSADMIN role..."
+        Write-Information $sql
 
         sqlcmd.exe -E -S $sql_server_instance -Q $sql
 
         Write-Information ""
-        Write-Information "Restarting the SQL instance in normal mode..."
-        net stop $service_name
-        net start $service_name
 
-        # Restart any dependenT service that were running... 
-        foreach ($dependent_service in $dependent_services)
-        {
-            if($dependent_service.Status -eq 'Running')
-            {
-                $dependent_service_name = $dependent_service.Name
-                
-                # Check one more time to make sure it's not already running...
-                if ((Get-Service -Name $dependent_service_name).Status -ne 'Running')
-                {
-                    $msg = "Starting dependent service: $dependent_service_name"
-                    Write-Information $msg
+        $check_permission = @"
+IF EXISTS (
+    SELECT * FROM sys.server_role_members
+    WHERE member_principal_id = SUSER_ID('$login_to_be_granted_access')
+      AND role_principal_id = SUSER_ID('sysadmin')
+)
+    PRINT '****** VERIFICATION SUCCEEDED ****************'
+ELSE
+    RAISERROR('ERROR: Verification failed.', 16, 1);
+GO
+"@
+
+        Write-Information "Verifying sysadmin permissions..."
+        Write-Information $check_permission
+
+        sqlcmd.exe -E -S $sql_server_instance -Q $check_permission
+
+        Write-Information ""
+        Write-Information "Restarting SQL instance in normal mode..."
+
+        net stop $service_name | Out-Null
+        net start $service_name | Out-Null
+
+        Write-Information ""
+        Write-Information "Restart dependent services if they were running previously"
+        Write-Information ""
+        $dependent_services | Format-Table -Property DisplayName, Status, StartType
+        Write-Information ""
+
+        foreach ($dependent_service in $dependent_services) {
+
+            $dependent_service_name = $dependent_service.Name
+            if ($dependent_service.Status -eq 'Running') {
+                if ((Get-Service -Name $dependent_service_name).Status -ne 'Running') {
+                    Write-Information "Starting dependent service: $dependent_service_name"
                     $dependent_service.Start()
                 }
             }
-
-
         }
     }
-    else
-    {
-        Throw "Error: SQL Instance is not running...."
+    else {
+        throw "Error: SQL instance did not start as expected."
     }
 }
+
