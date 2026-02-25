@@ -1,57 +1,107 @@
-# See Blog Post: https://sqlpal.blogspot.com/2023/08/remotely-check-disk-space-find-and-delete-large-files.html
+# -------------------------------------------------------------------------------------------------
+# Script Name: Get-LargeRemoteFiles.ps1
+# Description:
+#   Retrieves and displays the top N largest files on one or more remote computers, with optional
+#   filtering by file name, minimum size, and last modification date. Useful for locating large
+#   or old backup files on SQL Server or other systems.
+#
+# See Blog Post:
+#   https://sqlpal.blogspot.com/2023/08/remotely-check-disk-space-find-and-delete-large-files.html
+#
+# Usage Example:
+#   This example finds the top 5 largest BAK files containing the word "FULL" on drive O:, that are
+#   at least 100 MB in size and were last modified more than 8 days ago.
+#
+#   You can customize the parameters as needed or comment out filters to broaden the results.
+# -------------------------------------------------------------------------------------------------
 
-<#
-In below example,  I am looking for top 5 largest files in O:\ containing *FULL*.BAK in the 
-file name and at least larger than 100MB and last modified date is at least before 8 days. 
-You can change the filter values to your needs and if you don't want to use a filter, 
-just comment it out by putting the hash sign (#) in front it. And lastly, 
-don't forget to change the value for $computer_name variable to your server name. 
-You can also enter multiple server names, separated by a comma, for example:
-#>
+# -----------------------------
+# User Configuration Section
+# -----------------------------
 
-# Name of the remote computer
+# Name of the remote computer(s) to query. You can specify multiple names separated by commas.
 $computer_name = @("SQLServer1")
- 
-# Drive letter or a subfolder on a drive to search for the large sizes
+
+# Target drive or folder path on the remote machine
 $remote_folder = 'O:\'   
 
-# Add optional filters
-$filter_by_name = '*FULL*.BAK'
-$filter_by_size = 100*1024*1024    # 100*1024*1024 = 100MB
-$filter_by_last_modified_before_days = -8 # Note the minus (-) sign
+# Optionally, filter for file name pattern (use wildcards as needed)
+$filter_by_name = '*.bak'
 
-$top_n = 5  # Limit the results to the top n files by size
-# Make sure the $filter_by_last_modified_before_days is a negative value
-if($filter_by_last_modified_before_days -gt 0) {$filter_by_last_modified_before_days = $filter_by_last_modified_before_days * -1}
+# Minimum file size filter, in bytes (100 * 1024 * 1024 = 100MB)
+$filter_by_size = 100 * 1024 * 1024    
 
-# Set the filters to default values if not already Set by the caller
-if($top_n -eq $null -or $top_n -eq 0 -or $top_n -eq '') {$top_n=50}
-if($filter_by_name -eq $null -or $filter_by_name -eq '') {$filter_by_name='*'}
-if($filter_by_size -eq $null -or $filter_by_size -eq '') {$filter_by_size=0}
-if($filter_by_last_modified_before_days -eq $null -or $filter_by_last_modified_before_days -eq '') 
-{$filter_by_last_modified_before_days=0}
+# Optionarlly, only include files last modified before this number of days ago
+# NOTE: Use a negative number so (Get-Date).AddDays(-8) means "older than 8 days".
+$filter_by_last_modified_before_days = -8 
 
+# Limit the output to the top N largest files
+$top_n = 5  
 
-# Lets get the fqdn for the remote computer
+# -----------------------------
+# Input Validation and Defaults
+# -----------------------------
+
+# Ensure the day filter value is negative; prevents confusion with positive inputs
+if ($filter_by_last_modified_before_days -gt 0) {
+    $filter_by_last_modified_before_days = $filter_by_last_modified_before_days * -1
+}
+
+# Set default values if variables are not provided
+if ([string]::IsNullOrEmpty($top_n) -or $top_n -eq 0) { $top_n = 50 }
+if ([string]::IsNullOrEmpty($filter_by_name)) { $filter_by_name = '*' }
+if ([string]::IsNullOrEmpty($filter_by_size)) { $filter_by_size = 0 }
+if ([string]::IsNullOrEmpty($filter_by_last_modified_before_days)) { $filter_by_last_modified_before_days = 0 }
+
+# -----------------------------
+# Resolve FQDN for Remote Computers
+# -----------------------------
+# Some servers may require fully-qualified domain names (FQDN) for remote commands.
 $computer_fqdn = @()
-foreach($computer in $computer_name){$computer_fqdn += @([System.Net.Dns]::GetHostEntry($computer).HostName)}
+foreach ($computer in $computer_name) {
+    try {
+        $computer_fqdn += @([System.Net.Dns]::GetHostEntry($computer).HostName)
+    } catch {
+        Write-Warning "Unable to resolve FQDN for $computer. Using provided name."
+        $computer_fqdn += $computer
+    }
+}
 
+# -----------------------------
+# Invoke Remote Command
+# -----------------------------
+# Uses PowerShell Remoting to connect and scan the target directory.
+# Requires WinRM enabled and appropriate credentials.
+$large_files = @(
+    Invoke-Command -ComputerName $computer_fqdn `
+                   -ArgumentList $remote_folder, $filter_by_name, $filter_by_size, $top_n `
+                   -ScriptBlock {
+        # Enumerate all matching files recursively under $remote_folder
+        Get-ChildItem $Using:remote_folder -Filter $Using:filter_by_name -Recurse `
+                       -ErrorAction SilentlyContinue -Force |
+        Where-Object { $_.Length -gt $Using:filter_by_size } |
+        Sort-Object Length -Descending |
+        Select-Object FullName,
+            @{Name = "Size(GB)"; Expression = { [Math]::Round($_.Length / 1GB, 2) }},
+            @{Name = "Size(MB)"; Expression = { [Math]::Round($_.Length / 1MB, 0) }},
+            LastWriteTime `
+        -First $Using:top_n
+    }
+)
 
-$large_files = @(Invoke-Command -computername $computer_fqdn -ArgumentList $remote_folder, $filter_by_name, $filter_by_size, $top_n  `
-               -scriptBlock {Get-ChildItem $Using:remote_folder -Filter $Using:filter_by_name  -recurse -ErrorAction SilentlyContinue –Force | 
-                             where-object {$_.length -gt $Using:filter_by_size} | 
-                             Sort-Object length -Descending | 
-                             select   fullname, 
-                                      @{Name="Size(GB)";Expression={[Math]::round($_.length / 1GB, 2)}}, 
-                                      @{Name="Size(MB)";Expression={[Math]::round($_.length / 1MB, 0)}}, 
-                                      LastWriteTime `
-                             -First $Using:top_n
-                            }  
-                )
-# Display
-$large_files | sort -Property 'Size(MB)'  -Descending | ft PSComputerName, 'Size(MB)', 'Size(GB)', LastWriteTime, FullName
+# -----------------------------
+# Display Results
+# -----------------------------
+# Sort output by Size(MB) for readability.
+$large_files | Sort-Object -Property 'Size(MB)' -Descending |
+    Format-Table PSComputerName, 'Size(MB)', 'Size(GB)', LastWriteTime, FullName
 
-#$files_to_delete = $large_files | where-object {$_.LastWriteTime -lt ((Get-date).AddDays($filter_by_last_modified_before_days))} | select FullName
+# Optionally, you can prepare a list of files to delete if they’re older than N days.
+# Uncomment the following line if needed:
+# $files_to_delete = $large_files | Where-Object { $_.LastWriteTime -lt ((Get-Date).AddDays($filter_by_last_modified_before_days)) } | Select-Object FullName
 
+# Display total count for clarity
 $large_files_count = $large_files.Count
 "Number of files: $large_files_count"
+
+
