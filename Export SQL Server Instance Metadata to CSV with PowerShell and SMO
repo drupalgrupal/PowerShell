@@ -1,0 +1,161 @@
+<#
+.SYNOPSIS
+Export SQL Server instance metadata (properties, settings, configuration) to CSV.
+
+.DESCRIPTION
+Uses SMO from the SqlServer PowerShell module to collect:
+- Server information properties (version, edition, OS, etc.)
+- Server settings
+- Server configuration (sp_configure-style) run and config values
+
+Writes three wide CSV files per instance, one row per instance per file.
+Tested with SQL Server 2016–2022 and PowerShell 5.1/7.x.
+#>
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$ServerInstance,
+
+    [Parameter(Mandatory = $false)]
+    [string]$OutputFolder = (Get-Location).Path,
+
+    [Parameter(Mandatory = $false)]
+    [System.Management.Automation.PSCredential]$SqlCredential
+)
+
+# Ensure output folder exists
+if (-not (Test-Path -LiteralPath $OutputFolder)) {
+    New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null
+}
+
+Write-Verbose "Output folder: $OutputFolder"
+
+# Load SqlServer module (brings in SMO)
+if (-not (Get-Module -Name SqlServer -ListAvailable)) {
+    throw "The 'SqlServer' PowerShell module is not installed. Install-Module SqlServer -Scope CurrentUser"
+}
+
+Import-Module SqlServer -ErrorAction Stop
+
+# Build file names
+$sanitizedInstance = $ServerInstance -replace '\\', '_'
+$exportInfoPath     = Join-Path $OutputFolder "$sanitizedInstance`_info.csv"
+$exportSettingsPath = Join-Path $OutputFolder "$sanitizedInstance`_settings.csv"
+$exportConfigPath   = Join-Path $OutputFolder "$sanitizedInstance`_config.csv"
+
+# Connect to the instance
+try {
+    if ($SqlCredential) {
+        $srvConn = New-Object Microsoft.SqlServer.Management.Common.ServerConnection
+        $srvConn.ServerInstance = $ServerInstance
+        $srvConn.LoginSecure = $false
+        $srvConn.Login = $SqlCredential.UserName
+        $srvConn.SecurePassword = $SqlCredential.Password
+        $instance = New-Object Microsoft.SqlServer.Management.Smo.Server($srvConn)
+    }
+    else {
+        # Windows authentication
+        $instance = New-Object Microsoft.SqlServer.Management.Smo.Server $ServerInstance
+    }
+
+    # Touch a simple property to force connection
+    $null = $instance.Information.Version
+
+} catch {
+    throw "Failed to connect to SQL Server instance '$ServerInstance'. $_"
+}
+
+# Basic host info
+$hostName = $instance.NetName
+try {
+    $hostIp = [System.Net.Dns]::GetHostAddresses($hostName) |
+              Where-Object { $_.AddressFamily -eq 'InterNetwork' } |
+              Select-Object -First 1 -ExpandProperty IPAddressToString
+} catch {
+    $hostIp = $null
+}
+
+$dbCount = $instance.Databases.Count
+
+Write-Verbose "Connected to $ServerInstance ($hostName, IP: $hostIp, Databases: $dbCount)"
+
+# Raw SMO collections
+$infoProps     = $instance.Information.Properties | Select-Object Name, Value
+$settingsProps = $instance.Settings.Properties    | Select-Object Name, Value
+$configProps   = $instance.Configuration.Properties |
+                 Select-Object DisplayName, Description, RunValue, ConfigValue
+
+# Build wide objects
+
+# 1) Info
+$infoObject = [PSCustomObject]@{
+    HostName          = $hostName
+    IPAddress         = $hostIp
+    NumberOfDatabases = $dbCount
+    ServerInstance    = $ServerInstance
+}
+
+foreach ($p in $infoProps) {
+    $name  = $p.Name
+    $value = $p.Value
+    if (-not $infoObject.PSObject.Properties.Match($name)) {
+        $infoObject | Add-Member -MemberType NoteProperty -Name $name -Value $value
+    }
+}
+
+# 2) Settings
+$settingsObject = [PSCustomObject]@{
+    HostName          = $hostName
+    IPAddress         = $hostIp
+    NumberOfDatabases = $dbCount
+    ServerInstance    = $ServerInstance
+}
+
+foreach ($p in $settingsProps) {
+    $name  = $p.Name
+    $value = $p.Value
+    if (-not $settingsObject.PSObject.Properties.Match($name)) {
+        $settingsObject | Add-Member -MemberType NoteProperty -Name $name -Value $value
+    }
+}
+
+# 3) Config (sp_configure-style)
+$configRunObject = [PSCustomObject]@{
+    ValueType        = 'RunValue'
+    HostName         = $hostName
+    IPAddress        = $hostIp
+    NumberOfDatabases= $dbCount
+    ServerInstance   = $ServerInstance
+}
+
+$configConfigObject = [PSCustomObject]@{
+    ValueType        = 'ConfigValue'
+    HostName         = $hostName
+    IPAddress        = $hostIp
+    NumberOfDatabases= $dbCount
+    ServerInstance   = $ServerInstance
+}
+
+foreach ($c in $configProps) {
+    $name        = $c.DisplayName
+    $runValue    = $c.RunValue
+    $configValue = $c.ConfigValue
+
+    if (-not $configRunObject.PSObject.Properties.Match($name)) {
+        $configRunObject    | Add-Member -MemberType NoteProperty -Name $name -Value $runValue
+        $configConfigObject | Add-Member -MemberType NoteProperty -Name $name -Value $configValue
+    }
+}
+
+$configObjects = @($configConfigObject, $configRunObject)
+
+# Export to CSV
+$infoObject     | Export-Csv -Path $exportInfoPath     -NoTypeInformation
+$settingsObject | Export-Csv -Path $exportSettingsPath -NoTypeInformation
+$configObjects  | Export-Csv -Path $exportConfigPath   -NoTypeInformation
+
+Write-Host "Export completed for $ServerInstance"
+Write-Host "Info CSV:     $exportInfoPath"
+Write-Host "Settings CSV: $exportSettingsPath"
+Write-Host "Config CSV:   $exportConfigPath"
