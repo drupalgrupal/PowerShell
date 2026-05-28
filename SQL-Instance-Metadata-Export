@@ -98,14 +98,8 @@ Shows what the script would do without creating any files.
 Passes SQL Server instance names through the pipeline and creates consolidated inventory CSV files.
 
 .NOTES
-Author      : Your Name
 Blog        : https://sqlpal.blogspot.com
-Repository  : https://github.com/youraccount/sql-instance-metadata-export
-https://github.com/drupalgrupal/PowerShell/sql-instance-metadata-export
-
-https://github.com/drupalgrupal/PowerShell/SQL-Instance-Metadata-Export
-Export-SQLServer-Instance-Metadata-To-CSV with PowerShell and SMO
-
+Repository  : https://github.com/drupalgrupal/PowerShell/blob/main/SQL-Instance-Metadata-Export
 Version     : 1.0.0
 Created     : 2026-05-28
 Updated     : 2026-05-28
