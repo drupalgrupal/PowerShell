@@ -1,0 +1,342 @@
+<# SAVE THIS FILE AS Export-InstanceMetadata.ps1
+
+.SYNOPSIS
+Exports SQL Server instance metadata for one or more instances into consolidated CSV inventory files.
+
+.DESCRIPTION
+Export-InstanceMetadata.ps1 connects to one or more SQL Server instances and
+collects instance-level metadata using SQL Server Management Objects (SMO).
+
+The script creates three consolidated CSV inventory files:
+- <FileBaseName>_Info.csv
+- <FileBaseName>_Settings.csv
+- <FileBaseName>_Config.csv
+
+These files are designed to provide an inventory view across multiple SQL Server
+instances, rather than generating separate files for each server.
+
+Metadata categories exported:
+
+1. Information
+   Server.Information properties such as version, edition, collation,
+   operating system details, and related server attributes.
+
+2. Settings
+   Server.Settings properties exposed through SMO.
+
+3. Configuration
+   Server.Configuration properties similar to sp_configure values.
+   Two rows are exported per instance in the configuration CSV:
+   - ConfigValue
+   - RunValue
+
+.PARAMETER ServerInstance
+One or more SQL Server instance names.
+
+Examples:
+- ProdSql01
+- SQLServer1\SQL2019
+- SQLNodeA\INST1,SQLNodeB\INST2
+
+.PARAMETER OutputFolder
+The folder where CSV files will be written.
+If not specified, the current working directory is used.
+
+.PARAMETER FileBaseName
+Base file name used for the consolidated CSV files.
+
+Default:
+SQLInstanceMetadata
+
+Example output files when FileBaseName is set to ProdInventory:
+- ProdInventory_Info.csv
+- ProdInventory_Settings.csv
+- ProdInventory_Config.csv
+
+.PARAMETER SqlCredential
+Optional SQL Server credential for SQL authentication.
+If omitted, Windows authentication is used.
+
+.EXAMPLE
+.\Export-InstanceMetadata.ps1 -ServerInstance "ProdSql01"
+
+Exports metadata for a single SQL Server instance using Windows authentication.
+Creates these files in the current folder:
+- SQLInstanceMetadata_Info.csv
+- SQLInstanceMetadata_Settings.csv
+- SQLInstanceMetadata_Config.csv
+
+.EXAMPLE
+.\Export-InstanceMetadata.ps1 -ServerInstance "SQL01","SQL02\INST1","SQL03" -OutputFolder "C:\SQL\Metadata" -Verbose
+
+Exports metadata for multiple SQL Server instances and writes the consolidated
+inventory CSV files to C:\SQL\Metadata.
+
+.EXAMPLE
+.\Export-InstanceMetadata.ps1 -ServerInstance "SQL01","SQL02" -OutputFolder "C:\SQL\Inventory" -FileBaseName "ProdSQLInventory"
+
+Creates these files:
+- ProdSQLInventory_Info.csv
+- ProdSQLInventory_Settings.csv
+- ProdSQLInventory_Config.csv
+
+.EXAMPLE
+$cred = Get-Credential
+.\Export-InstanceMetadata.ps1 -ServerInstance "ProdSql01","ProdSql02" -OutputFolder "C:\SQL\Metadata" -SqlCredential $cred
+
+Uses SQL authentication instead of Windows authentication and exports
+consolidated inventory files for both SQL Server instances.
+
+.EXAMPLE
+.\Export-InstanceMetadata.ps1 -ServerInstance "SQL01","SQL02" -OutputFolder "C:\SQL\Metadata" -FileBaseName "Baseline" -WhatIf
+
+Shows what the script would do without creating any files.
+
+.EXAMPLE
+"SQL01","SQL02\INST1","SQL03" | .\Export-InstanceMetadata.ps1 -OutputFolder "C:\SQL\Metadata" -FileBaseName "EstateInventory"
+
+Passes SQL Server instance names through the pipeline and creates consolidated inventory CSV files.
+
+.NOTES
+Author      : Your Name
+Blog        : https://sqlpal.blogspot.com
+Repository  : https://github.com/youraccount/sql-instance-metadata-export
+https://github.com/drupalgrupal/PowerShell/sql-instance-metadata-export
+
+https://github.com/drupalgrupal/PowerShell/SQL-Instance-Metadata-Export
+Export-SQLServer-Instance-Metadata-To-CSV with PowerShell and SMO
+
+Version     : 1.0.0
+Created     : 2026-05-28
+Updated     : 2026-05-28
+
+Requirements:
+- PowerShell 5.1 or later, or PowerShell 7.x
+- SqlServer PowerShell module
+- Network connectivity to target SQL Server instances
+- Appropriate SQL Server permissions to view instance metadata
+
+Install the required module:
+Install-Module SqlServer -Scope CurrentUser
+
+Help:
+Get-Help .\Export-InstanceMetadata.ps1
+Get-Help .\Export-InstanceMetadata.ps1
+Get-Help .\Export-InstanceMetadata.ps1 -Examples
+Get-Help .\Export-InstanceMetadata.ps1 -Detailed
+Get-Help .\Export-InstanceMetadata.ps1 -Full
+
+.VERSION HISTORY
+1.0.0 - 2026-05-28
+- Initial GitHub-ready release
+- Added support for multiple ServerInstance values
+- Added consolidated CSV inventory outputs
+- Added FileBaseName parameter
+- Added comment-based help and usage examples
+- Switched to ordered hashtable object construction for CSV shaping
+#>
+
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Low')]
+param(
+    [Parameter(Mandatory = $true, Position = 0, ValueFromPipeline = $true, ValueFromPipelineByPropertyName = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string[]]$ServerInstance,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateNotNullOrEmpty()]
+    [string]$OutputFolder = (Get-Location).Path,
+
+    [Parameter(Mandatory = $false)]
+    [ValidateNotNullOrEmpty()]
+    [string]$FileBaseName = 'SQLInstanceMetadata',
+
+    [Parameter(Mandatory = $false)]
+    [System.Management.Automation.PSCredential]$SqlCredential
+)
+
+begin {
+    if (-not (Test-Path -LiteralPath $OutputFolder)) {
+        if ($PSCmdlet.ShouldProcess($OutputFolder, 'Create output folder')) {
+            New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null
+        }
+    }
+
+    Write-Verbose "Output folder: $OutputFolder"
+    Write-Verbose "File base name: $FileBaseName"
+
+    if (-not (Get-Module -Name SqlServer -ListAvailable)) {
+        throw "The 'SqlServer' PowerShell module is not installed. Install-Module SqlServer -Scope CurrentUser"
+    }
+
+    Import-Module SqlServer -ErrorAction Stop
+    Write-Verbose "SqlServer module loaded successfully"
+
+    $allInfoRows = New-Object System.Collections.Generic.List[object]
+    $allSettingsRows = New-Object System.Collections.Generic.List[object]
+    $allConfigRows = New-Object System.Collections.Generic.List[object]
+    $processedInstances = New-Object System.Collections.Generic.List[string]
+    $failedInstances = New-Object System.Collections.Generic.List[string]
+}
+
+process {
+    foreach ($instanceName in $ServerInstance) {
+        Write-Verbose "Starting export for instance: $instanceName"
+
+        try {
+            if ($SqlCredential) {
+                Write-Verbose "Connecting to $instanceName using SQL authentication"
+
+                $srvConn = New-Object Microsoft.SqlServer.Management.Common.ServerConnection
+                $srvConn.ServerInstance = $instanceName
+                $srvConn.LoginSecure = $false
+                $srvConn.Login = $SqlCredential.UserName
+                $srvConn.SecurePassword = $SqlCredential.Password
+                $instance = New-Object Microsoft.SqlServer.Management.Smo.Server($srvConn)
+            }
+            else {
+                Write-Verbose "Connecting to $instanceName using Windows authentication"
+                $instance = New-Object Microsoft.SqlServer.Management.Smo.Server $instanceName
+            }
+
+            $null = $instance.Information.Version
+            Write-Verbose "Connected successfully to $instanceName"
+        }
+        catch {
+            Write-Warning "Failed to connect to SQL Server instance '$instanceName'. $($_.Exception.Message)"
+            $failedInstances.Add($instanceName)
+            continue
+        }
+
+        $hostName = $instance.NetName
+
+        try {
+            $hostIp = [System.Net.Dns]::GetHostAddresses($hostName) |
+                Where-Object { $_.AddressFamily -eq 'InterNetwork' } |
+                Select-Object -First 1 -ExpandProperty IPAddressToString
+        }
+        catch {
+            Write-Verbose "Unable to resolve IPv4 address for host '$hostName'"
+            $hostIp = $null
+        }
+
+        try {
+            $dbCount = $instance.Databases.Count
+        }
+        catch {
+            Write-Verbose "Unable to retrieve database count for instance '$instanceName'"
+            $dbCount = $null
+        }
+
+        Write-Verbose "Instance: $instanceName | Host: $hostName | IP: $hostIp | Databases: $dbCount"
+
+        try {
+            $infoProps = $instance.Information.Properties | Select-Object Name, Value
+            $settingsProps = $instance.Settings.Properties | Select-Object Name, Value
+            $configProps = $instance.Configuration.Properties |
+                Select-Object DisplayName, Description, RunValue, ConfigValue
+        }
+        catch {
+            Write-Warning "Failed to retrieve metadata from instance '$instanceName'. $($_.Exception.Message)"
+            $failedInstances.Add($instanceName)
+            continue
+        }
+
+        $infoHash = [ordered]@{
+            ServerInstance    = $instanceName
+            HostName          = $hostName
+            IPAddress         = $hostIp
+            NumberOfDatabases = $dbCount
+        }
+
+        foreach ($p in $infoProps) {
+            $name = $p.Name
+            if (-not [string]::IsNullOrWhiteSpace($name) -and -not $infoHash.Contains($name)) {
+                $infoHash[$name] = $p.Value
+            }
+        }
+
+        $settingsHash = [ordered]@{
+            ServerInstance    = $instanceName
+            HostName          = $hostName
+            IPAddress         = $hostIp
+            NumberOfDatabases = $dbCount
+        }
+
+        foreach ($p in $settingsProps) {
+            $name = $p.Name
+            if (-not [string]::IsNullOrWhiteSpace($name) -and -not $settingsHash.Contains($name)) {
+                $settingsHash[$name] = $p.Value
+            }
+        }
+
+        $configValueHash = [ordered]@{
+            ServerInstance    = $instanceName
+            HostName          = $hostName
+            IPAddress         = $hostIp
+            NumberOfDatabases = $dbCount
+            ValueType         = 'ConfigValue'
+        }
+
+        $runValueHash = [ordered]@{
+            ServerInstance    = $instanceName
+            HostName          = $hostName
+            IPAddress         = $hostIp
+            NumberOfDatabases = $dbCount
+            ValueType         = 'RunValue'
+        }
+
+        foreach ($c in $configProps) {
+            $name = $c.DisplayName
+            if (-not [string]::IsNullOrWhiteSpace($name)) {
+                if (-not $configValueHash.Contains($name)) {
+                    $configValueHash[$name] = $c.ConfigValue
+                }
+
+                if (-not $runValueHash.Contains($name)) {
+                    $runValueHash[$name] = $c.RunValue
+                }
+            }
+        }
+
+        $allInfoRows.Add([PSCustomObject]$infoHash)
+        $allSettingsRows.Add([PSCustomObject]$settingsHash)
+        $allConfigRows.Add([PSCustomObject]$configValueHash)
+        $allConfigRows.Add([PSCustomObject]$runValueHash)
+        $processedInstances.Add($instanceName)
+    }
+}
+
+end {
+    $infoCsvPath = Join-Path $OutputFolder "$FileBaseName`_Info.csv"
+    $settingsCsvPath = Join-Path $OutputFolder "$FileBaseName`_Settings.csv"
+    $configCsvPath = Join-Path $OutputFolder "$FileBaseName`_Config.csv"
+
+    try {
+        if ($allInfoRows.Count -gt 0 -and $PSCmdlet.ShouldProcess($infoCsvPath, 'Export consolidated info CSV')) {
+            $allInfoRows | Export-Csv -Path $infoCsvPath -NoTypeInformation -Encoding UTF8
+        }
+
+        if ($allSettingsRows.Count -gt 0 -and $PSCmdlet.ShouldProcess($settingsCsvPath, 'Export consolidated settings CSV')) {
+            $allSettingsRows | Export-Csv -Path $settingsCsvPath -NoTypeInformation -Encoding UTF8
+        }
+
+        if ($allConfigRows.Count -gt 0 -and $PSCmdlet.ShouldProcess($configCsvPath, 'Export consolidated config CSV')) {
+            $allConfigRows | Export-Csv -Path $configCsvPath -NoTypeInformation -Encoding UTF8
+        }
+
+        [PSCustomObject]@{
+            FileBaseName        = $FileBaseName
+            OutputFolder        = $OutputFolder
+            InfoCsv             = $infoCsvPath
+            SettingsCsv         = $settingsCsvPath
+            ConfigCsv           = $configCsvPath
+            ProcessedInstances  = $processedInstances.Count
+            FailedInstances     = $failedInstances.Count
+        }
+    }
+    catch {
+        throw "Failed to export consolidated CSV files. $($_.Exception.Message)"
+    }
+}
+
+
