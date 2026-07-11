@@ -7,10 +7,11 @@ Exports SQL Server instance metadata for one or more instances into consolidated
 Export-InstanceMetadata.ps1 connects to one or more SQL Server instances and
 collects instance-level metadata using SQL Server Management Objects (SMO).
 
-The script creates three consolidated CSV inventory files:
+The script creates four output files:
 - <FileBaseName>_Info.csv
 - <FileBaseName>_Settings.csv
 - <FileBaseName>_Config.csv
+- <FileBaseName>_README.txt
 
 These files are designed to provide an inventory view across multiple SQL Server
 instances, rather than generating separate files for each server.
@@ -52,6 +53,7 @@ Example output files when FileBaseName is set to ProdInventory:
 - ProdInventory_Info.csv
 - ProdInventory_Settings.csv
 - ProdInventory_Config.csv
+- ProdInventory_README.txt
 
 .PARAMETER SqlCredential
 Optional SQL Server credential for SQL authentication.
@@ -65,6 +67,7 @@ Creates these files in the current folder:
 - SQLInstanceMetadata_Info.csv
 - SQLInstanceMetadata_Settings.csv
 - SQLInstanceMetadata_Config.csv
+- SQLInstanceMetadata_README.txt
 
 .EXAMPLE
 .\Export-InstanceMetadata.ps1 -ServerInstance "SQL01","SQL02\INST1","SQL03" -OutputFolder "C:\SQL\Metadata" -Verbose
@@ -79,6 +82,7 @@ Creates these files:
 - ProdSQLInventory_Info.csv
 - ProdSQLInventory_Settings.csv
 - ProdSQLInventory_Config.csv
+- ProdSQLInventory_README.txt
 
 .EXAMPLE
 $cred = Get-Credential
@@ -121,6 +125,15 @@ Get-Help .\Export-InstanceMetadata.ps1 -Detailed
 Get-Help .\Export-InstanceMetadata.ps1 -Full
 
 .VERSION HISTORY
+.VERSION HISTORY
+1.2.0 - 2026-07-11
+- Added failed instance name listing to README.txt
+- Added script start time, end time, and duration to README.txt
+
+1.1.0 - 2026-07-11
+- Added companion README.txt output file
+- Documented CSV output contents and data collection method in README.txt
+
 1.0.0 - 2026-05-28
 - Initial GitHub-ready release
 - Added support for multiple ServerInstance values
@@ -149,6 +162,8 @@ param(
 )
 
 begin {
+    $scriptStartTime = Get-Date
+
     if (-not (Test-Path -LiteralPath $OutputFolder)) {
         if ($PSCmdlet.ShouldProcess($OutputFolder, 'Create output folder')) {
             New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null
@@ -157,6 +172,8 @@ begin {
 
     Write-Verbose "Output folder: $OutputFolder"
     Write-Verbose "File base name: $FileBaseName"
+    Write-Verbose "Script start time: $($scriptStartTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+
 
     if (-not (Get-Module -Name SqlServer -ListAvailable)) {
         throw "The 'SqlServer' PowerShell module is not installed. Install-Module SqlServer -Scope CurrentUser"
@@ -202,6 +219,22 @@ process {
         }
 
         $hostName = $instance.NetName
+        $DT    = $instance.Databases["master"].ExecuteWithResults('SELECT LEFT(@@VERSION, CHARINDEX(CHAR(10), @@VERSION + CHAR(10)) - 1) AS VersionString;').Tables[0]
+        $SQLVersionString = $dt.VersionString
+
+        $DT    = $instance.Databases["master"].ExecuteWithResults('SELECT LEFT(@@VERSION, CHARINDEX(CHAR(10), @@VERSION + CHAR(10)) - 1) AS VersionString;').Tables[0]
+        $SQLVersionString = $dt.VersionString
+
+        $DT2   = $instance.Databases["master"].ExecuteWithResults('SELECT SERVERPROPERTY(''IsHadrEnabled'') [AlwaysOnStatus];').Tables[0]
+        $AlwaysOnStatus = $dt2.AlwaysOnStatus
+
+        switch ($AlwaysOnStatus) {
+            $null { $AlwaysOn = 'Not Applicable' }
+            0     { $AlwaysOn = 'Disabled' }
+            1     { $AlwaysOn = 'Enabled' }
+            default { $AlwaysOn = 'Unknown' }
+        }
+
 
         try {
             $hostIp = [System.Net.Dns]::GetHostAddresses($hostName) |
@@ -239,7 +272,9 @@ process {
             ServerInstance    = $instanceName
             HostName          = $hostName
             IPAddress         = $hostIp
+            SQLVersionString  = $SQLVersionString
             NumberOfDatabases = $dbCount
+            AlwaysOnStatus    = $AlwaysOn
         }
 
         foreach ($p in $infoProps) {
@@ -253,7 +288,9 @@ process {
             ServerInstance    = $instanceName
             HostName          = $hostName
             IPAddress         = $hostIp
+            SQLVersionString  = $SQLVersionString
             NumberOfDatabases = $dbCount
+            AlwaysOnStatus    = $AlwaysOn
         }
 
         foreach ($p in $settingsProps) {
@@ -267,7 +304,9 @@ process {
             ServerInstance    = $instanceName
             HostName          = $hostName
             IPAddress         = $hostIp
+            SQLVersionString  = $SQLVersionString
             NumberOfDatabases = $dbCount
+            AlwaysOnStatus    = $AlwaysOn
             ValueType         = 'ConfigValue'
         }
 
@@ -275,7 +314,9 @@ process {
             ServerInstance    = $instanceName
             HostName          = $hostName
             IPAddress         = $hostIp
+            SQLVersionString  = $SQLVersionString
             NumberOfDatabases = $dbCount
+            AlwaysOnStatus    = $AlwaysOn
             ValueType         = 'RunValue'
         }
 
@@ -301,9 +342,93 @@ process {
 }
 
 end {
+    $scriptEndTime = Get-Date
+    $scriptDuration = $scriptEndTime - $scriptStartTime
+
     $infoCsvPath = Join-Path $OutputFolder "$FileBaseName`_Info.csv"
     $settingsCsvPath = Join-Path $OutputFolder "$FileBaseName`_Settings.csv"
     $configCsvPath = Join-Path $OutputFolder "$FileBaseName`_Config.csv"
+    $readmePath = Join-Path $OutputFolder "$FileBaseName`_README.txt"
+
+    $failedInstanceSection = if ($failedInstances.Count -gt 0) {
+        ($failedInstances | Sort-Object | ForEach-Object { "- $_" }) -join [Environment]::NewLine
+    }
+    else {
+        "- None"
+    }
+
+    $readmeContent = @"
+SQL Server Instance Metadata Inventory
+=====================================
+
+This output set was generated by Export-InstanceMetadata.ps1.
+
+Purpose
+-------
+These files provide an inventory of instance-level SQL Server metadata collected
+from one or more SQL Server instances using PowerShell and SQL Server Management
+Objects (SMO).
+
+Output Files
+------------
+1. $FileBaseName`_Info.csv
+   - Contains data collected from Server.Information
+   - Includes properties such as version, edition, collation, operating system details,
+     and other server identity information
+   - One row per SQL Server instance
+
+2. $FileBaseName`_Settings.csv
+   - Contains data collected from Server.Settings
+   - Includes instance-level settings exposed through SMO
+   - One row per SQL Server instance
+
+3. $FileBaseName`_Config.csv
+   - Contains data collected from Server.Configuration
+   - Includes configuration values similar to sp_configure
+   - Two rows per SQL Server instance:
+       * ValueType = ConfigValue
+       * ValueType = RunValue
+
+Common Columns
+--------------
+The following columns are added to all output files:
+- ServerInstance: SQL Server instance name supplied to the script
+- HostName: SQL Server host name reported by SMO
+- IPAddress: First resolved IPv4 address for the host, if available
+- SQLVersionString: SQL Server Version Name
+- NumberOfDatabases: Count of databases visible on the instance
+- AlwaysOnStatus: Whether SQL Server AlwaysOn Feature is enabled, if applicable
+
+How Data Was Collected
+----------------------
+- The script uses the SqlServer PowerShell module
+- SQL Server metadata is collected through SMO
+- Authentication:
+    * Windows Authentication by default
+    * SQL Authentication if -SqlCredential is supplied
+- The script connects to each SQL Server instance in the input list
+- Metadata is collected and stored in memory
+- Consolidated CSV files are written at the end of processing
+
+Run Summary
+-----------
+- Script start time: $($scriptStartTime.ToString('yyyy-MM-dd HH:mm:ss'))
+- Script end time:   $($scriptEndTime.ToString('yyyy-MM-dd HH:mm:ss'))
+- Duration:          $($scriptDuration.ToString('hh\:mm\:ss'))
+- Processed instances: $($processedInstances.Count)
+- Failed instances:    $($failedInstances.Count)
+
+Failed Instance Names
+---------------------
+$failedInstanceSection
+
+Notes
+-----
+- This output is intended for instance inventory and configuration review
+- It does not include database-level or object-level metadata
+- If a connection fails for one instance, the script continues processing the others
+- Missing values may occur if properties are not available or permissions are limited
+"@
 
     try {
         if ($allInfoRows.Count -gt 0 -and $PSCmdlet.ShouldProcess($infoCsvPath, 'Export consolidated info CSV')) {
@@ -318,19 +443,37 @@ end {
             $allConfigRows | Export-Csv -Path $configCsvPath -NoTypeInformation -Encoding UTF8
         }
 
+        if ($PSCmdlet.ShouldProcess($readmePath, 'Write README output documentation file')) {
+            Set-Content -Path $readmePath -Value $readmeContent -Encoding UTF8
+        }
+
+
+        Write-Host "Export completed."
+        Write-Host "Info CSV:     $infoCsvPath"
+        Write-Host "Settings CSV: $settingsCsvPath"
+        Write-Host "Config CSV:   $configCsvPath"
+        Write-Host "README File:  $readmePath"
+        Write-Host "Started:      $($scriptStartTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+        Write-Host "Ended:        $($scriptEndTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+        Write-Host "Duration:     $($scriptDuration.ToString('hh\:mm\:ss'))"
+
         [PSCustomObject]@{
             FileBaseName        = $FileBaseName
             OutputFolder        = $OutputFolder
             InfoCsv             = $infoCsvPath
             SettingsCsv         = $settingsCsvPath
             ConfigCsv           = $configCsvPath
+            ReadmeFile          = $readmePath
+            StartTime           = $scriptStartTime
+            EndTime             = $scriptEndTime
+            Duration            = $scriptDuration.ToString('hh\:mm\:ss')
             ProcessedInstances  = $processedInstances.Count
             FailedInstances     = $failedInstances.Count
+            FailedInstanceNames = if ($failedInstances.Count -gt 0) { $failedInstances -join '; ' } else { '' }
         }
+
     }
     catch {
         throw "Failed to export consolidated CSV files. $($_.Exception.Message)"
     }
 }
-
-
